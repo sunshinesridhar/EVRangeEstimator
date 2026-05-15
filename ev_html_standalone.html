@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>⚡ EV Range Estimator — India Edition</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0a0f1e;color:#e2e8f0;font-family:system-ui,sans-serif;padding:16px}
+select option{background:#1e293b;color:#fff}
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:#1e293b}
+::-webkit-scrollbar-thumb{background:#334155;border-radius:3px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState}=React;
+
+const CHEMISTRIES={
+  LFP:{label:"LFP",full:"Lithium Iron Phosphate",color:"#22c55e",
+       degrad:[1.00,0.94,0.90,0.86,0.82],note:"Excellent longevity — wider safe SOC window, can charge to 100% daily."},
+  NMC:{label:"NMC",full:"Nickel Manganese Cobalt",color:"#3b82f6",
+       degrad:[1.00,0.91,0.85,0.78,0.73],note:"Charge to 80% max on long trips for longevity."},
+  NCA:{label:"NCA",full:"Nickel Cobalt Aluminium",color:"#a855f7",
+       degrad:[1.00,0.90,0.84,0.77,0.72],note:"Very high energy density. Handle similar to NMC."},
+};
+const STANDARDS={
+  ARAI:{label:"ARAI / MIDC",full:"ARAI certified — MIDC test cycle (India)",factor:0.70,color:"#ef4444",
+        tip:"India's official standard — ARAI authority tests using MIDC cycle. Expect ~70% of quoted range in real driving."},
+  WLTP:{label:"WLTP",factor:0.83,color:"#22c55e",tip:"Global standard. Closer to real-world. Used by Hyundai, Kia, BYD."},
+  NEDC:{label:"NEDC",factor:0.65,color:"#dc2626",tip:"Old EU standard, very optimistic."},
+  EPA :{label:"EPA", factor:0.88,color:"#10b981",tip:"Most conservative standard. Used by Tesla."},
+};
+const DRIVING=[{v:"eco",l:"🌿 Eco",m:1.07},{v:"normal",l:"🚗 Normal",m:1.00},{v:"aggressive",l:"🔥 Aggressive",m:0.88}];
+const DLABELS=["New","3 Years","5 Years","8 Years","10 Years"];
+const VC=["#3b82f6","#10b981","#a855f7"],ML=["A","B","C"];
+
+const MODEL_DB=[
+  {kw:["nexon"],c:"LFP",s:"ARAI"},{kw:["punch"],c:"LFP",s:"ARAI"},
+  {kw:["tiago"],c:"LFP",s:"ARAI"},{kw:["tigor"],c:"NMC",s:"ARAI"},
+  {kw:["curvv"],c:"NMC",s:"ARAI"},{kw:["be6","be 6","be6e","be 6e"],c:"NMC",s:"ARAI"},
+  {kw:["xev9s","xev 9s","9s"],c:"LFP",s:"ARAI"},
+  {kw:["xev9e","xev 9e","9e"],c:"LFP",s:"ARAI"}, // BYD Blade LFP
+  {kw:["exuv","xuv400","e xuv"],c:"NMC",s:"ARAI"},
+  {kw:["zs ev","mg zs"],c:"NMC",s:"ARAI"},{kw:["comet"],c:"LFP",s:"ARAI"},
+  {kw:["windsor"],c:"LFP",s:"ARAI"},{kw:["creta"],c:"NMC",s:"ARAI"},
+  {kw:["ioniq 5","ioniq5"],c:"NMC",s:"WLTP"},{kw:["ioniq 6","ioniq6"],c:"NMC",s:"WLTP"},
+  {kw:["ev6"],c:"NMC",s:"WLTP"},{kw:["atto 3","atto3"],c:"LFP",s:"WLTP"},
+  {kw:["byd seal"],c:"NMC",s:"WLTP"},{kw:["bz4x"],c:"NMC",s:"WLTP"},
+  {kw:["model 3","model y","tesla"],c:"NCA",s:"EPA"},{kw:["vitara"],c:"NMC",s:"ARAI"},
+  {kw:["sonet"],c:"NMC",s:"ARAI"},{kw:["leaf"],c:"NMC",s:"WLTP"},
+];
+
+const detectLocal=n=>{
+  if(!n||n.length<2)return null;
+  const l=n.toLowerCase();
+  return MODEL_DB.find(m=>m.kw.some(k=>l.includes(k)))||null;
+};
+
+const empty=()=>({model:"",battery:"",claimedRange:"",chemistry:"LFP",standard:"ARAI",auto:false,aiMatch:false,autoNote:""});
+const Pill=({children,style})=><span style={{borderRadius:20,padding:"2px 9px",fontSize:11,fontWeight:700,...style}}>{children}</span>;
+const S={
+  inp:{width:"100%",background:"#1e293b",color:"#fff",border:"1px solid #334155",borderRadius:8,padding:"7px 10px",fontSize:13,outline:"none",boxSizing:"border-box"},
+  lbl:{fontSize:11,color:"#64748b",display:"block",marginBottom:4},
+  sel:{width:"100%",background:"#1e293b",color:"#fff",border:"1px solid #334155",borderRadius:8,padding:"7px 10px",fontSize:13,outline:"none",boxSizing:"border-box",cursor:"pointer"},
+  card:{background:"#111827",borderRadius:16,padding:20},
+};
+
+function ZoneBar({v,rr,maxR,mode,trip,idx}){
+  const isLFP=v.chemistry==="LFP";
+  const bw=Math.min((rr/maxR)*100,100);
+  const segs=mode==="longtrip"
+    ?isLFP
+      ?[{pct:10,bg:"#ef4444",soc:"0–10%",name:"Risk Zone",km:rr*0.10},
+        {pct:10,bg:"#22c55e",soc:"10–20%",name:"Extended",km:rr*0.10},
+        {pct:60,bg:"#3b82f6",soc:"20–80%",name:"Standard",km:rr*0.60},
+        {pct:10,bg:"#22c55e",soc:"80–90%",name:"Extended",km:rr*0.10},
+        {pct:10,bg:"#eab308",soc:"90–100%",name:"Buffer",km:rr*0.10}]
+      :[{pct:20,bg:"#ef4444",soc:"0–20%",name:"Risk Zone",km:rr*0.20},
+        {pct:60,bg:"#3b82f6",soc:"20–80%",name:"Standard",km:rr*0.60},
+        {pct:20,bg:"#eab308",soc:"80–100%",name:"Buffer",km:rr*0.20}]
+    :isLFP
+      ?[{pct:10,bg:"#ef4444",soc:"0–10%",name:"Risk Zone",km:rr*0.10},
+        {pct:90,bg:"#22c55e",soc:"10–100%",name:"Daily Use",km:rr*0.90}]
+      :[{pct:10,bg:"#ef4444",soc:"0–10%",name:"Risk Zone",km:rr*0.10},
+        {pct:90,bg:"#3b82f6",soc:"10–100%",name:"Daily Use",km:rr*0.90}];
+
+  const u6=rr*0.60,u8=isLFP?rr*0.80:null,u9=rr*0.90;
+  const s6=Math.max(0,Math.ceil(trip/u6)-1);
+  const s8=u8?Math.max(0,Math.ceil(trip/u8)-1):null;
+
+  return(
+    <div style={{marginBottom:28}}>
+      <div style={{display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:6,marginBottom:6}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+          <span style={{color:VC[idx],fontWeight:700,fontSize:14}}>Model {ML[idx]}: {v.model} · {v.battery} kWh</span>
+          <Pill style={{background:CHEMISTRIES[v.chemistry].color+"22",color:CHEMISTRIES[v.chemistry].color}}>{v.chemistry}</Pill>
+          <Pill style={{background:"#1e293b",color:STANDARDS[v.standard].color}}>{STANDARDS[v.standard].label}</Pill>
+        </div>
+      </div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:10,marginBottom:8,alignItems:"center"}}>
+        <span style={{fontSize:12,color:"#93c5fd",fontWeight:600}}>🔵 {Math.round(u6)} km <span style={{fontWeight:400,color:"#475569"}}>(20–80%)</span></span>
+        {u8&&<span style={{fontSize:12,color:"#86efac",fontWeight:600}}>🟢 {Math.round(u8)} km <span style={{fontWeight:400,color:"#475569"}}>(10–90%)</span></span>}
+        <span style={{fontSize:12,color:"#fde68a",fontWeight:600}}>🟡 {Math.round(u9)} km <span style={{fontWeight:400,color:"#475569"}}>(10–100% daily)</span></span>
+        {mode==="longtrip"&&<span style={{fontSize:11,color:"#fbbf24"}}>→ {s6} stop{s6!==1?"s":""}{s8!==null?` · ${s8} (ext)`:""} for {trip} km</span>}
+      </div>
+      <div style={{width:`${bw}%`,minWidth:100}}>
+        <div style={{height:42,display:"flex",borderRadius:10,overflow:"hidden"}}>
+          {segs.map((s,si)=>(
+            <div key={si} style={{flex:`${s.pct} 0 0`,background:s.bg,display:"flex",alignItems:"center",justifyContent:"center",
+              borderRight:si<segs.length-1?"2px solid rgba(0,0,0,0.2)":"none",overflow:"hidden",minWidth:0}}>
+              <span style={{fontSize:s.pct>=50?12:s.pct>=15?10:9,color:"rgba(255,255,255,0.95)",fontWeight:800,whiteSpace:"nowrap"}}>
+                {Math.round(s.km)}km
+              </span>
+            </div>
+          ))}
+        </div>
+        <div style={{display:"flex",marginTop:5}}>
+          {segs.map((s,si)=>(
+            <div key={si} style={{flex:`${s.pct} 0 0`,textAlign:"center",overflow:"hidden",minWidth:0,padding:"0 1px"}}>
+              <div style={{fontSize:9,color:s.bg,fontWeight:700,whiteSpace:"nowrap",overflow:"hidden"}}>{s.soc}</div>
+              <div style={{fontSize:8,color:"#64748b",whiteSpace:"nowrap",overflow:"hidden"}}>{s.name}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Legend({mode,hasLFP}){
+  const items=[
+    {c:"#ef4444",l:"Risk Zone",d:mode==="longtrip"?"0–20% NMC · 0–10% LFP":"0–10% all — never discharge here"},
+    ...(hasLFP?[{c:"#22c55e",l:"LFP Extended",d:mode==="longtrip"?"10–20% & 80–90% (LFP only)":"10–100% LFP"}]:[]),
+    {c:"#3b82f6",l:"Standard 20–80%",d:mode==="longtrip"?"Apple-to-apple all chemistries":"NMC daily"},
+    ...(mode==="longtrip"?[{c:"#eab308",l:"Charge Buffer",d:"80–100% NMC · 90–100% LFP"}]:[]),
+    {c:"#fde68a",l:"Daily 10–100%",d:"Full daily usable range"},
+  ];
+  return(
+    <div style={{background:"#0f172a",border:"1px solid #1e293b",borderRadius:12,padding:"10px 16px",marginTop:12,display:"flex",flexWrap:"wrap",gap:12}}>
+      {items.map((l,i)=>(
+        <div key={i} style={{display:"flex",alignItems:"center",gap:6}}>
+          <div style={{width:14,height:14,borderRadius:3,background:l.c,flexShrink:0}}/>
+          <span style={{fontSize:11,color:l.c,fontWeight:700}}>{l.l}</span>
+          <span style={{fontSize:11,color:"#475569"}}>{l.d}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function App(){
+  const [variants,setVariants]=useState([empty(),empty()]);
+  const [mode,setMode]=useState("longtrip");
+  const [drive,setDrive]=useState("normal");
+  const [ac,setAc]=useState(true);
+  const [trip,setTrip]=useState(500);
+
+  const addV=()=>variants.length<3&&setVariants([...variants,empty()]);
+  const removeV=i=>setVariants(v=>v.filter((_,j)=>j!==i));
+  const updV=(i,f,val)=>setVariants(v=>{const a=[...v];a[i][f]=val;return a;});
+
+  const handleModel=(i,val)=>{
+    const a=variants.map((v,j)=>j!==i?v:{...v,model:val,auto:false,aiMatch:false,autoNote:""});
+    const hit=detectLocal(val);
+    if(hit)a[i]={...a[i],chemistry:hit.c,standard:hit.s,auto:true,autoNote:"✓ Matched from local database"};
+    setVariants(a);
+  };
+
+  const dm=DRIVING.find(d=>d.v===drive).m,acF=ac?0.95:1.0;
+  const realRange=(v,deg=1)=>parseFloat(v.claimedRange)*STANDARDS[v.standard].factor*dm*acF*deg;
+  const usableStd=(v,deg=1)=>mode==="longtrip"?realRange(v,deg)*0.60:realRange(v,deg)*0.90;
+  const usableExt=(v,deg=1)=>v.chemistry==="LFP"&&mode==="longtrip"?realRange(v,deg)*0.80:null;
+  const usableDaily=(v,deg=1)=>realRange(v,deg)*0.90;
+  const stopsFor=(km,ur)=>ur>0?Math.max(0,Math.ceil(km/ur)-1):0;
+
+  const valid=variants.filter(v=>v.model.trim()&&v.battery&&v.claimedRange&&!isNaN(parseFloat(v.claimedRange))&&parseFloat(v.claimedRange)>0);
+  const maxR=valid.length?Math.max(...valid.map(v=>realRange(v,1))):1;
+  const hasLFP=valid.some(v=>v.chemistry==="LFP");
+
+  return(
+    <div style={{maxWidth:980,margin:"0 auto"}}>
+      <div style={{textAlign:"center",marginBottom:22}}>
+        <div style={{fontSize:24,fontWeight:800,marginBottom:4}}>⚡ EV Range Estimator
+          <span style={{fontSize:12,fontWeight:400,color:"#475569",background:"#1e293b",padding:"2px 8px",borderRadius:6,marginLeft:8}}>India Edition</span>
+        </div>
+        <div style={{color:"#475569",fontSize:13}}>Real-world range · ARAI/MIDC vs actual · Battery chemistry & degradation</div>
+        <div style={{marginTop:6,fontSize:11,color:"#1e3a5f",background:"#0f172a",display:"inline-block",padding:"3px 12px",borderRadius:20}}>💡 Type a model name — auto-fill for 20+ Indian EV models</div>
+      </div>
+
+      <div style={{...S.card,marginBottom:18,display:"flex",flexWrap:"wrap",gap:10,alignItems:"center"}}>
+        <div style={{display:"flex",gap:6}}>
+          {[{v:"longtrip",i:"🛣️",l:"Long Trip",c:"#3b82f6"},{v:"daily",i:"🏙️",l:"Daily City",c:"#22c55e"}].map(m=>(
+            <button key={m.v} onClick={()=>setMode(m.v)} style={{padding:"6px 14px",borderRadius:10,border:"none",cursor:"pointer",fontSize:13,fontWeight:600,background:mode===m.v?m.c:"#1e293b",color:mode===m.v?"#fff":"#94a3b8"}}>{m.i} {m.l}</button>
+          ))}
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <span style={{color:"#64748b",fontSize:12}}>Style:</span>
+          {DRIVING.map(d=><button key={d.v} onClick={()=>setDrive(d.v)} style={{padding:"5px 10px",borderRadius:8,border:"none",cursor:"pointer",fontSize:12,background:drive===d.v?"#7c3aed":"#1e293b",color:drive===d.v?"#fff":"#94a3b8"}}>{d.l}</button>)}
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <span style={{color:"#64748b",fontSize:12}}>AC:</span>
+          <button onClick={()=>setAc(!ac)} style={{padding:"5px 12px",borderRadius:8,border:"none",cursor:"pointer",fontSize:12,background:ac?"#ea580c":"#1e293b",color:ac?"#fff":"#94a3b8"}}>{ac?"On (−5%)":"Off"}</button>
+        </div>
+        {mode==="longtrip"&&<div style={{display:"flex",alignItems:"center",gap:6}}>
+          <span style={{color:"#64748b",fontSize:12}}>Trip:</span>
+          <input type="number" value={trip} onChange={e=>setTrip(Math.max(1,parseInt(e.target.value)||1))} style={{width:72,...S.inp}}/>
+          <span style={{color:"#64748b",fontSize:12}}>km</span>
+        </div>}
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:`repeat(${Math.min(variants.length+(variants.length<3?1:0),3)},1fr)`,gap:14,marginBottom:22}}>
+        {variants.map((v,i)=>{
+          const chem=CHEMISTRIES[v.chemistry],std=STANDARDS[v.standard];
+          const noteColor=v.autoNote.startsWith("⚠")?"#f87171":v.aiMatch?"#fbbf24":"#22c55e";
+          return(
+            <div key={i} style={{...S.card,borderTop:`3px solid ${VC[i]}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                <span style={{color:VC[i],fontWeight:700,fontSize:14}}>Model {ML[i]}</span>
+                {variants.length>1&&<button onClick={()=>removeV(i)} style={{background:"none",border:"none",color:"#475569",cursor:"pointer",fontSize:16,lineHeight:1}}>✕</button>}
+              </div>
+              <div style={{marginBottom:10}}>
+                <label style={S.lbl}>Model Name</label>
+                <input type="text" placeholder="e.g. Mahindra XEV 9S" value={v.model} onChange={e=>handleModel(i,e.target.value)} style={S.inp}/>
+                {v.autoNote&&<div style={{fontSize:10,color:noteColor,marginTop:3}}>{v.autoNote}</div>}
+                {!v.autoNote&&<div style={{fontSize:10,color:"#334155",marginTop:3}}>Try: XEV 9S, Nexon EV, BE 6, Atto 3…</div>}
+              </div>
+              <div style={{marginBottom:10}}>
+                <label style={S.lbl}>Battery Chemistry</label>
+                <select value={v.chemistry} onChange={e=>updV(i,"chemistry",e.target.value)} style={S.sel}>
+                  {Object.entries(CHEMISTRIES).map(([k,c])=><option key={k} value={k}>{k} — {c.full}</option>)}
+                </select>
+                <div style={{fontSize:10,color:chem.color,marginTop:3}}>{chem.note}</div>
+              </div>
+              <div style={{marginBottom:10}}>
+                <label style={S.lbl}>Battery Pack (kWh)</label>
+                <input type="number" placeholder="e.g. 79" value={v.battery} onChange={e=>updV(i,"battery",e.target.value)} style={S.inp}/>
+              </div>
+              <div style={{marginBottom:10}}>
+                <label style={S.lbl}>Claimed Range (km)</label>
+                <input type="number" placeholder="e.g. 683" value={v.claimedRange} onChange={e=>updV(i,"claimedRange",e.target.value)} style={S.inp}/>
+              </div>
+              <div>
+                <label style={S.lbl}>Range Standard</label>
+                <select value={v.standard} onChange={e=>updV(i,"standard",e.target.value)} style={S.sel}>
+                  {Object.entries(STANDARDS).map(([k,s])=><option key={k} value={k}>{s.label} (~{Math.round(s.factor*100)}% real)</option>)}
+                </select>
+                <div style={{fontSize:10,color:std.color,marginTop:3}}>{std.tip}</div>
+              </div>
+            </div>
+          );
+        })}
+        {variants.length<3&&<button onClick={addV} style={{background:"#111827",border:"2px dashed #334155",borderRadius:16,color:"#475569",cursor:"pointer",fontSize:13,minHeight:200,display:"flex",alignItems:"center",justifyContent:"center"}}>＋ Add Model</button>}
+      </div>
+
+      {valid.length>0&&<React.Fragment>
+        {valid.some(v=>v.standard==="ARAI")&&(
+          <div style={{background:"#1c1008",border:"1px solid #92400e",borderRadius:12,padding:"10px 16px",marginBottom:16,fontSize:12,color:"#fbbf24",display:"flex",gap:8}}>
+            <span>⚠️</span><span><strong>ARAI/MIDC Reality Check:</strong> ARAI tests using MIDC cycle — typically 65–75% of quoted range in real conditions. 70% correction applied.</span>
+          </div>
+        )}
+
+        <div style={{...S.card,marginBottom:4}}>
+          <div style={{fontWeight:700,fontSize:15,marginBottom:4}}>
+            {mode==="longtrip"?"🛣️ Long Trip Range — New Battery":"🏙️ Daily City Range — New Battery"}
+          </div>
+          <div style={{fontSize:12,color:"#64748b",marginBottom:18}}>
+            {mode==="longtrip"
+              ?"🔵 standard (20–80%) · 🟢 LFP extended (10–90%) · 🟡 daily max (10–100%) shown above each bar"
+              :"🟡 Daily full usable range (10–100%) · 🟢 LFP in green · 🔵 NMC in blue"}
+          </div>
+          {valid.map((v,i)=><ZoneBar key={i} v={v} rr={realRange(v)} maxR={maxR} mode={mode} trip={trip} idx={i}/>)}
+          <Legend mode={mode} hasLFP={hasLFP}/>
+          <div style={{fontSize:10,color:"#334155",marginTop:8}}>Bar width scaled to real-world range · Claimed × standard × driving × AC</div>
+        </div>
+
+        <div style={{...S.card,marginBottom:16,overflowX:"auto",marginTop:16}}>
+          <div style={{fontWeight:700,fontSize:15,marginBottom:4}}>🔋 Usable Range & Effective Capacity Over Battery Life</div>
+          <div style={{fontSize:12,color:"#64748b",marginBottom:16}}>Shows usable km + effective kWh at each age. LFP ~18% loss vs NMC ~27% at 10yr.</div>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+            <thead>
+              <tr style={{borderBottom:"2px solid #1e293b"}}>
+                <th style={{textAlign:"left",padding:"8px 12px 8px 0",color:"#64748b",fontWeight:500}}>Age</th>
+                <th style={{textAlign:"center",padding:"8px",color:"#64748b",fontWeight:500}}>Health</th>
+                {valid.map((v,i)=>(
+                  <th key={i} colSpan={v.chemistry==="LFP"&&mode==="longtrip"?2:1} style={{textAlign:"center",padding:"8px",color:VC[i],fontWeight:700}}>
+                    Model {ML[i]}: {v.model}<br/>
+                    <span style={{color:CHEMISTRIES[v.chemistry].color,fontSize:11}}>{v.chemistry}</span>
+                    <span style={{color:"#475569",fontWeight:400,fontSize:11}}> · {v.battery} kWh</span>
+                  </th>
+                ))}
+              </tr>
+              {mode==="longtrip"&&(
+                <tr style={{borderBottom:"1px solid #1e293b"}}>
+                  <th/><th/>
+                  {valid.map((v,i)=>(
+                    v.chemistry==="LFP"
+                      ?<React.Fragment key={i}>
+                        <th style={{textAlign:"center",padding:"3px 6px 6px",color:"#3b82f6",fontWeight:600,fontSize:11}}>🔵 20–80%</th>
+                        <th style={{textAlign:"center",padding:"3px 6px 6px",color:"#22c55e",fontWeight:600,fontSize:11}}>🟢 10–90%</th>
+                      </React.Fragment>
+                      :<th key={i} style={{textAlign:"center",padding:"3px 6px 6px",color:"#3b82f6",fontWeight:600,fontSize:11}}>🔵 20–80%</th>
+                  ))}
+                </tr>
+              )}
+            </thead>
+            <tbody>
+              {DLABELS.map((lbl,di)=>(
+                <tr key={di} style={{borderBottom:"1px solid #1e293b"}}>
+                  <td style={{padding:"10px 12px 10px 0",fontWeight:700,color:"#e2e8f0",whiteSpace:"nowrap"}}>{lbl}</td>
+                  <td style={{padding:"10px 8px",textAlign:"center"}}>
+                    <div style={{display:"flex",gap:3,justifyContent:"center",flexWrap:"wrap"}}>
+                      {valid.map((v,i)=>{
+                        const deg=CHEMISTRIES[v.chemistry].degrad[di];
+                        const hc=deg>=0.92?"#22c55e":deg>=0.84?"#eab308":"#ef4444";
+                        return <span key={i} style={{background:hc+"22",color:hc,borderRadius:20,padding:"1px 6px",fontSize:11,fontWeight:700}}>
+                          <span style={{color:VC[i]}}>{ML[i]}</span>{Math.round(deg*100)}%
+                        </span>;
+                      })}
+                    </div>
+                  </td>
+                  {valid.map((v,i)=>{
+                    const deg=CHEMISTRIES[v.chemistry].degrad[di];
+                    const effKwh=(parseFloat(v.battery)*deg).toFixed(1);
+                    const urS=usableStd(v,deg),baseS=usableStd(v,1);
+                    const urE=usableExt(v,deg),baseE=v.chemistry==="LFP"&&mode==="longtrip"?usableExt(v,1):null;
+                    const sS=mode==="longtrip"?stopsFor(trip,urS):null;
+                    const sE=urE?stopsFor(trip,urE):null;
+                    const days=mode==="daily"?Math.floor(urS/50):null;
+                    const CellEl=({km,kwh,loss,stops,dy,color,bg})=>(
+                      <td style={{padding:"8px",textAlign:"center",borderLeft:"1px solid #1e293b",background:bg||"transparent"}}>
+                        <div style={{fontWeight:700,color:color||"#93c5fd",fontSize:14}}>{Math.round(km)} km</div>
+                        <div style={{fontSize:10,color:"#64748b",marginTop:1}}>{kwh} kWh eff.</div>
+                        {loss>0&&<div style={{fontSize:10,color:"#ef4444"}}>−{Math.round(loss)} km</div>}
+                        {stops!==null&&<div style={{fontSize:10,color:"#fbbf24"}}>{stops} stop{stops!==1?"s":""}</div>}
+                        {dy!==null&&dy!==undefined&&<div style={{fontSize:10,color:"#94a3b8"}}>~{dy}d</div>}
+                      </td>
+                    );
+                    return v.chemistry==="LFP"&&mode==="longtrip"
+                      ?<React.Fragment key={i}>
+                        <CellEl km={urS} kwh={effKwh} loss={baseS-urS} stops={sS}/>
+                        <CellEl km={urE} kwh={effKwh} loss={baseE?baseE-urE:0} stops={sE} color="#86efac" bg="#0a1f0a"/>
+                      </React.Fragment>
+                      :<CellEl key={i} km={urS} kwh={effKwh} loss={baseS-urS} stops={sS} dy={days}/>;
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{fontSize:10,color:"#475569",marginTop:8}}>† Effective kWh = battery size × health %. Degradation indicative — varies with charging habits & Indian summer temps.</div>
+        </div>
+
+        <div style={{display:"grid",gridTemplateColumns:`repeat(${valid.length},1fr)`,gap:14,marginBottom:20}}>
+          {valid.map((v,i)=>{
+            const chem=CHEMISTRIES[v.chemistry],std=STANDARDS[v.standard];
+            const urSN=usableStd(v,1),urS10=usableStd(v,chem.degrad[4]);
+            const urEN=usableExt(v,1),urE10=usableExt(v,chem.degrad[4]);
+            const urDN=usableDaily(v,1),urD10=usableDaily(v,chem.degrad[4]);
+            const effN=(parseFloat(v.battery)).toFixed(1);
+            const eff10=(parseFloat(v.battery)*chem.degrad[4]).toFixed(1);
+            const sStdN=mode==="longtrip"?stopsFor(trip,urSN):null;
+            const sStd10=mode==="longtrip"?stopsFor(trip,urS10):null;
+            const sExtN=urEN?stopsFor(trip,urEN):null;
+            const sExt10=urE10?stopsFor(trip,urE10):null;
+            const rows=[
+              {l:"Chemistry",v:chem.full,c:chem.color},
+              {l:"Standard",v:std.label,c:std.color},
+              {l:"🔵 20–80% (new)",v:`${Math.round(urSN)} km`,c:"#93c5fd"},
+              {l:"🔵 20–80% (10yr)",v:`${Math.round(urS10)} km`,c:"#93c5fd"},
+              ...(urEN?[{l:"🟢 10–90% LFP (new)",v:`${Math.round(urEN)} km`,c:"#86efac"},{l:"🟢 10–90% LFP (10yr)",v:`${Math.round(urE10)} km`,c:"#86efac"}]:[]),
+              {l:"🟡 Daily 10–100% (new)",v:`${Math.round(urDN)} km`,c:"#fde68a"},
+              {l:"🟡 Daily 10–100% (10yr)",v:`${Math.round(urD10)} km`,c:"#fde68a"},
+              {l:"Eff. capacity (new)",v:`${effN} kWh`,c:"#94a3b8"},
+              {l:"Eff. capacity (10yr)",v:`${eff10} kWh`,c:"#94a3b8"},
+              ...(mode==="longtrip"?[
+                {l:"Stops 20–80% (new)",v:`${sStdN} stop${sStdN!==1?"s":""}`,c:"#fbbf24"},
+                {l:"Stops 20–80% (10yr)",v:`${sStd10} stop${sStd10!==1?"s":""}`,c:"#fbbf24"},
+                ...(sExtN!==null?[{l:"Stops 10–90% (new)",v:`${sExtN} stop${sExtN!==1?"s":""}`,c:"#fbbf24"},{l:"Stops 10–90% (10yr)",v:`${sExt10} stop${sExt10!==1?"s":""}`,c:"#fbbf24"}]:[]),
+              ]:[]),
+              {l:"Range lost at 10yr",v:`−${Math.round(urSN-urS10)} km (${Math.round((1-urS10/urSN)*100)}%)`,c:"#ef4444"},
+            ];
+            return(
+              <div key={i} style={{...S.card,borderLeft:`3px solid ${VC[i]}`}}>
+                <div style={{color:VC[i],fontWeight:700,fontSize:13,marginBottom:12}}>Model {ML[i]}: {v.model} · {v.battery} kWh</div>
+                <div style={{display:"flex",gap:6,marginBottom:12}}>
+                  <Pill style={{background:chem.color+"22",color:chem.color}}>{v.chemistry}</Pill>
+                  <Pill style={{background:"#1e293b",color:std.color}}>{std.label}</Pill>
+                </div>
+                {rows.map((r,ri)=>(
+                  <div key={ri} style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:7,gap:8,fontSize:12}}>
+                    <span style={{color:"#64748b",flexShrink:0}}>{r.l}</span>
+                    <span style={{color:r.c,fontWeight:700,textAlign:"right"}}>{r.v}</span>
+                  </div>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      </React.Fragment>}
+
+      {valid.length===0&&(
+        <div style={{textAlign:"center",color:"#334155",padding:"60px 0"}}>
+          <div style={{fontSize:48,marginBottom:12}}>⚡</div>
+          <div style={{fontSize:14,marginBottom:6}}>Fill in at least one model above to see results</div>
+          <div style={{fontSize:12,color:"#1e3a5f"}}>Try: XEV 9S, Nexon EV, BE 6, Creta EV, Atto 3</div>
+        </div>
+      )}
+      <div style={{textAlign:"center",marginTop:16,paddingTop:16,borderTop:"1px solid #1e293b",fontSize:11,color:"#334155"}}>
+        EV Range Estimator · India Edition · Li-ion degradation research & ARAI/MIDC correction factors
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
